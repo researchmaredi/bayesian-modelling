@@ -1,0 +1,500 @@
+---
+title: "Assignment 3"
+author: "Madimetja Maredi"
+date: "`r Sys.Date()`"
+output:
+  word_document: default
+  html_document:
+    df_print: paged
+  pdf_document: default
+---
+
+
+# Setup chunk
+
+This chunk loads necessary R packages:
+
+tidyverse: Collection of packages for data manipulation and visualisation
+
+scales: Provides tools for formatting axis labels and values
+
+corrplot: For correlation matrix visualisation
+
+rstan: R interface to Stan for Bayesian modelling
+
+bayesplot: For Bayesian model diagnostic plots
+```{r setup, warning=FALSE, message=FALSE}
+library("tidyverse")
+library("scales")
+library("corrplot")
+library("rstan")
+library("bayesplot")
+```
+
+# Data import
+
+This chunk reads the AI companies dataset from a CSV file.
+```{r data_import, message=FALSE}
+data <- read_csv("Ai_companies.csv")
+```
+
+# Data Cleaning
+
+This chunk performs comprehensive data cleaning:
+
+It defines two helper functions:
+
+clean_numeric() to convert text values like "10 million" to actual numbers
+clean_rating() to standardize Glassdoor ratings
+
+The main data transformation:
+
+Selects only the columns needed for analysis
+
+Renames columns for easier reference
+
+Applies the cleaning functions to standardise data formats
+
+Creates log transformations of Annual Revenue
+
+Calculates company age by subtracting founding year from 2024
+
+Creates log transformation of company age
+
+Filters out entries with missing Glassdoor scores
+```{r data_cleaning, message=FALSE, warning=FALSE}
+clean_numeric <- function(x) {
+  multiplier <- ifelse(grepl("million", x, ignore.case = TRUE), 1e6,
+                       ifelse(grepl("billion", x, ignore.case = TRUE), 1e9, 1))
+  num <- as.numeric(gsub("[^-0-9.]", "", x))
+  num * multiplier
+}
+
+clean_rating <- function(x) {
+  s <- ifelse(x == "5-Apr", "4", x)
+  as.numeric(sub("/5", "", s))
+}
+
+Ass_data <- data %>%
+  select(Founded, `Annual Revenue`, `Glassdoor Score`) %>%
+  rename(Glass_Score = `Glassdoor Score`, Annual_Revenue = `Annual Revenue`) %>%
+  mutate(
+    Glass_Score = clean_rating(Glass_Score),
+    Annual_Revenue = clean_numeric(Annual_Revenue),
+    Annual_Revenue = parse_number(dollar(Annual_Revenue)),
+    log_AR = log(Annual_Revenue),
+    Age = 2024 - Founded,
+    log_Age = log(Age)
+  ) %>%
+  filter(!is.na(Glass_Score))
+```
+
+# Data Quality Check Chunk
+
+This chunk performs quality checks on the cleaned data:
+
+Counts missing values across all columns
+
+Creates boxplots to identify potential outliers in Annual Revenue and Glassdoor Score
+
+Produces summary statistics for all variables
+
+Generates histograms to visualize the distributions of Glassdoor Scores and log-transformed Annual Revenue
+```{r}
+missing_values <- Ass_data %>% 
+  summarize(across(everything(), ~sum(is.na(.))))
+print("Missing values check:")
+print(missing_values)
+
+
+ggplot(Ass_data, aes(y = Annual_Revenue)) + 
+  geom_boxplot() + 
+  labs(title = "Checking for outliers in Annual Revenue")
+
+ggplot(Ass_data, aes(y = Glass_Score)) + 
+  geom_boxplot() + 
+  labs(title = "Checking for outliers in Glassdoor Score")
+
+summary_stats <- Ass_data %>%
+  summary()
+print("Summary statistics after cleaning:")
+print(summary_stats)
+
+
+ggplot(Ass_data, aes(x = Glass_Score)) +
+  geom_histogram(bins = 10, fill = "steelblue", color = "black") +
+  labs(title = "Distribution of Glassdoor Scores after cleaning",
+       x = "Glassdoor Score",
+       y = "Count") +
+  theme_minimal()
+
+ggplot(Ass_data, aes(x = log_AR)) +
+  geom_histogram(bins = 10, fill = "steelblue", color = "black") +
+  labs(title = "Distribution of log-transformed Annual Revenue after cleaning",
+       x = "Log Annual Revenue",
+       y = "Count") +
+  theme_minimal()
+```
+
+The distribution of Glassdoor Scores clusters around higher ratings (3.5–4.5), indicating that most AI companies in our dataset tend to have good employee satisfaction. Meanwhile, the log-transformed Annual Revenue follows a more normal distribution than the raw values, validating our decision to apply the transformation for regression analysis.
+
+# Data slicing chunk
+
+This chunk partitions the data:
+
+Extracts the first row as MyPos for later prediction purposes
+
+Creates Ass_datanew dataset with all rows except the first one for model training
+
+Prints the extracted data point that will be used for prediction
+```{r data_slicing, message=FALSE, warning=FALSE}
+MyPos <- Ass_data %>% slice(1)
+print("Data point for prediction:")
+print(MyPos)
+
+Ass_datanew <- Ass_data %>% slice(-1)
+```
+
+# Exploratory Data Analysis Chunk
+
+This chunk explores relationships between variables:
+
+Creates scatter plots with fitted regression lines for:
+
+Glassdoor Score vs. log Annual Revenue
+log Age vs. log Annual Revenue
+
+
+Calculates correlation coefficients between key variables
+
+Visualises the correlation matrix using circles
+
+Runs linear regression models to test statistical significance
+```{r message=FALSE}
+ggplot(Ass_datanew, aes(x = Glass_Score, y = log_AR)) +
+  geom_point(alpha = 0.7, color = "darkblue") +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Relationship between Glassdoor Score and log Annual Revenue",
+       x = "Glassdoor Score", 
+       y = "Log Annual Revenue") +
+  theme_light()
+
+ggplot(Ass_datanew, aes(x = log_Age, y = log_AR)) +
+  geom_point(alpha = 0.7, color = "darkgreen") +
+  geom_smooth(method = "lm", color = "red") +
+  labs(title = "Relationship between log Age and log Annual Revenue",
+       x = "Log Age", 
+       y = "Log Annual Revenue") +
+  theme_light()
+
+correlation_matrix <- cor(Ass_datanew[, c("log_AR", "log_Age", "Glass_Score")])
+print("Correlation matrix:")
+print(correlation_matrix)
+
+corrplot(correlation_matrix, method = "circle", type = "upper",
+         addCoef.col = "black", number.cex = 0.7,
+         tl.col = "black", tl.srt = 45,
+         title = "Correlation Matrix of Key Variables")
+
+lm_test1 <- lm(log_AR ~ Glass_Score, data = Ass_datanew)
+lm_test2 <- lm(log_AR ~ log_Age, data = Ass_datanew)
+print("Statistical significance of Glass_Score:")
+print(summary(lm_test1)$coefficients)
+print("Statistical significance of log_Age:")
+print(summary(lm_test2)$coefficients)
+```
+
+Our analysis shows a moderate positive correlation (r = 0.51) between log Annual Revenue and log Age, suggesting that older AI companies tend to generate higher revenue. In contrast, the Glassdoor Score has a weaker correlation (r = 0.23) with log Annual Revenue, implying that employee satisfaction ratings may have a less significant impact on financial performance in this industry.
+
+
+# Bayesian Model Fitting Chunk
+
+This chunk defines and fits a robust Bayesian model:
+
+Specifies a Stan model with Student-t likelihood (robust to outliers)
+
+Defines model components:
+
+Data section: Specifies input data structure
+
+Parameters section: Defines model parameters (intercept, coefficients, error term, degrees of freedom)
+
+Model section: Specifies priors and likelihood
+
+Generated quantities: Creates posterior predictive samples
+
+
+Prepares data for Stan
+
+Fits the model with 4 chains and 2000 iterations
+```{r robust_model, message=FALSE, warning=FALSE}
+
+robust_model_code <- "
+data {
+  int N;               // Number of observations
+  vector[N] y;         // Response variable (log-transformed Annual Revenue)
+  int K;               // Number of predictors
+  matrix[N, K] X;      // Predictor matrix (Glassdoor Score and log Age)
+}
+parameters {
+  real alpha;          // Intercept
+  vector[K] beta;      // Coefficients for predictors
+  real<lower=0> sigma; // Scale (error) term
+  real<lower=1> nu;    // Degrees of freedom (for Student-t likelihood)
+}
+model {
+  // Priors for intercept and coefficients (using Student-t for robustness)
+  alpha ~ student_t(7, 0, 5);
+  beta ~ student_t(7, 0, 5);
+  sigma ~ normal(0, 5);
+  nu ~ gamma(2, 0.1);  // Prior for degrees of freedom
+  
+  // Likelihood with Student-t error distribution
+  y ~ student_t(nu, alpha + X * beta, sigma);
+}
+generated quantities {
+  // Generate posterior predictive samples for model checking
+  vector[N] y_pred;
+  for (n in 1:N)
+    y_pred[n] = student_t_rng(nu, alpha + X[n] * beta, sigma);
+}
+"
+
+robust_data <- list(
+  N = nrow(Ass_datanew),
+  y = Ass_datanew$log_AR,
+  K = 2,
+  X = as.matrix(Ass_datanew[, c("Glass_Score", "log_Age")])
+)
+
+
+robust_fit <- stan(
+  model_code = robust_model_code,
+  data = robust_data,
+  iter = 2000,
+  chains = 4,
+  seed = 2014095653,
+  refresh = 0  
+)
+```
+
+# Model summary and interpretation chunk
+
+This chunk provides comprehensive model interpretation:
+
+Summarises model parameters
+
+Labels coefficients for clarity
+
+Extracts posterior samples for further analysis
+
+Provides plain-language interpretation of coefficients
+
+Visualises posterior distributions with histograms
+
+Calculates and reports 95% credible intervals
+
+Performs posterior predictive checks to validate model fit
+```{r model_summary}
+
+print("Robust Bayesian Model Summary:")
+print(summary(robust_fit, pars = c("alpha", "beta", "sigma", "nu"))$summary)
+
+
+robust_coefs <- summary(robust_fit, pars = c("alpha", "beta"))$summary
+rownames(robust_coefs)[2:3] <- c("Glass_Score (beta[1])", "log_Age (beta[2])")
+print("Coefficients with labeled parameters:")
+print(robust_coefs)
+
+
+posterior_samples <- extract(robust_fit)
+
+
+glass_score_effect <- mean(posterior_samples$beta[,1])
+log_age_effect <- mean(posterior_samples$beta[,2])
+intercept <- mean(posterior_samples$alpha)
+nu_value <- mean(posterior_samples$nu)
+
+print("Interpretation of coefficients:")
+print(paste("1. Glass_Score: On average, a 1-point increase in Glassdoor score is associated with a", 
+    round(glass_score_effect, 3), "increase in log Annual Revenue, holding log Age constant."))
+print(paste("2. log_Age: On average, a 1-unit increase in log Age is associated with a", 
+    round(log_age_effect, 3), "increase in log Annual Revenue, holding Glassdoor score constant."))
+print(paste("3. The degrees of freedom parameter (nu) is estimated at", round(nu_value, 2), 
+           "suggesting a moderately heavy-tailed error distribution."))
+
+
+par(mfrow=c(2,2))
+hist(posterior_samples$alpha, main="Posterior for Intercept", xlab="alpha")
+hist(posterior_samples$beta[,1], main="Posterior for Glass_Score coefficient", xlab="beta[1]")
+hist(posterior_samples$beta[,2], main="Posterior for log_Age coefficient", xlab="beta[2]")
+hist(posterior_samples$nu, main="Posterior for Degrees of Freedom", xlab="nu")
+par(mfrow=c(1,1))
+
+
+alpha_ci <- quantile(posterior_samples$alpha, probs = c(0.025, 0.975))
+glass_score_ci <- quantile(posterior_samples$beta[,1], probs = c(0.025, 0.975))
+log_age_ci <- quantile(posterior_samples$beta[,2], probs = c(0.025, 0.975))
+
+print("95% Credible intervals:")
+print(paste("Intercept:", round(alpha_ci[1], 3), "to", round(alpha_ci[2], 3)))
+print(paste("Glass_Score effect:", round(glass_score_ci[1], 3), "to", round(glass_score_ci[2], 3)))
+print(paste("log_Age effect:", round(log_age_ci[1], 3), "to", round(log_age_ci[2], 3)))
+
+
+y_pred <- extract(robust_fit)$y_pred
+ppc_dens_overlay(Ass_datanew$log_AR, y_pred[1:50,]) +
+  ggtitle("Posterior predictive check")
+
+
+```
+
+# Prediction Chunk
+
+This chunk performs predictive analysis:
+
+Creates a modified scenario (decreasing Glassdoor score by 0.5 and increasing age by 1 year)
+
+Defines a custom prediction function using posterior samples
+
+Generates predictions for both original and modified scenarios
+
+Visualises predictive distributions with density plots
+
+Calculates and reports predictions in both log and dollar scales
+
+Computes percentage change in predicted revenue
+
+Calculates probability that revenue is higher in the modified scenario
+
+Creates and formats a comprehensive prediction summary table with credible intervals
+```{r predictions}
+
+newdata <- MyPos %>%
+  mutate(
+    Glass_Score = Glass_Score - 0.5, 
+    Age = Age + 1,                    
+    log_Age = log(Age)                
+  ) 
+
+
+predict_function <- function(data_row, samples) {
+  n_draws <- length(samples$alpha)
+  preds <- samples$alpha +
+           samples$beta[,1] * data_row$Glass_Score +
+           samples$beta[,2] * data_row$log_Age
+  return(preds)
+}
+
+
+pred_original <- predict_function(MyPos, posterior_samples)
+pred_modified <- predict_function(newdata, posterior_samples)
+
+
+pred_data <- data.frame(
+  Modified = pred_modified,
+  Original = pred_original
+) %>%
+  pivot_longer(cols = everything(), names_to = "Scenario", values_to = "Predicted_log_AR")
+
+ggplot(pred_data, aes(x = Predicted_log_AR, fill = Scenario)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Posterior Predictive Distributions",
+       subtitle = "Comparing original data point vs. modified scenario",
+       x = "Predicted log Annual Revenue",
+       y = "Density") +
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set1")
+
+
+median_pred_orig <- median(pred_original)
+median_pred_mod <- median(pred_modified)
+
+cat("\nMedian predictions (log scale):\n")
+cat("Original scenario:", median_pred_orig, "\n")
+cat("Modified scenario:", median_pred_mod, "\n")
+
+cat("\nMedian predictions (dollar amounts):\n")
+cat("Original scenario:", dollar(exp(median_pred_orig)), "\n")
+cat("Modified scenario:", dollar(exp(median_pred_mod)), "\n")
+
+# Calculate and report percent change
+pct_change <- (exp(median_pred_mod) - exp(median_pred_orig)) / exp(median_pred_orig) * 100
+
+cat("\nPercent change in predicted revenue:", round(pct_change, 2), "%\n")
+
+
+prob_higher <- mean(pred_modified > pred_original)
+cat("\nProbability that revenue is higher in the modified scenario:", round(prob_higher * 100, 1), "%\n")
+
+
+pred_summary <- data.frame(
+  Scenario = c("Original", "Modified"),
+  Median_Log_Revenue = c(median_pred_orig, median_pred_mod),
+  Mean_Log_Revenue = c(mean(pred_original), mean(pred_modified)),
+  Lower_CI_Log = c(quantile(pred_original, 0.025), quantile(pred_modified, 0.025)),
+  Upper_CI_Log = c(quantile(pred_original, 0.975), quantile(pred_modified, 0.975)),
+  Median_Dollar = c(exp(median_pred_orig), exp(median_pred_mod)),
+  Lower_CI_Dollar = c(exp(quantile(pred_original, 0.025)), exp(quantile(pred_modified, 0.025))),
+  Upper_CI_Dollar = c(exp(quantile(pred_original, 0.975)), exp(quantile(pred_modified, 0.975)))
+)
+
+
+pred_summary$Median_Dollar_Fmt <- dollar(pred_summary$Median_Dollar)
+pred_summary$Lower_CI_Dollar_Fmt <- dollar(pred_summary$Lower_CI_Dollar)
+pred_summary$Upper_CI_Dollar_Fmt <- dollar(pred_summary$Upper_CI_Dollar)
+
+print("Comprehensive prediction summary:")
+print(pred_summary[, c("Scenario", "Median_Log_Revenue", "Lower_CI_Log", "Upper_CI_Log", 
+                       "Median_Dollar_Fmt", "Lower_CI_Dollar_Fmt", "Upper_CI_Dollar_Fmt")])
+```
+
+# My final analysis:
+
+analysis employed a robust Bayesian approach with Student-t likelihood to model the 
+relationship between company characteristics and annual revenue in AI companies. 
+This model was specifically chosen for its ability to handle potential outliers and 
+non-normal error distributions in the data.
+
+Company Age Effect: The log-transformed company age is a strong predictor of revenue with a coefficient of  2.315. 
+This suggests that older AI companies tend to generate significantly higher revenue, 
+confirming the importance of market experience and business maturity.
+
+Glassdoor Rating Effect: Employee satisfaction, as measured by Glassdoor scores, has a positive but more modest 
+effect on revenue with a coefficient of  0.306. While the relationship is positive, 
+it's substantially weaker than the effect of company age.
+
+
+When we simulated decreasing the Glassdoor score by 0.5 while increasing the company age by 1 year, our model 
+predicted a  net decrease  in revenue of  0.11 %. The probability that this change would lead to higher revenue is
+49 %.
+
+This prediction highlights the relative importance of these factors: 
+the negative impact of a reduced Glassdoor score was  compounded  by the positive effect 
+of increased company age.
+
+This analysis provides strong evidence that company maturity is substantially more 
+important for revenue growth than employee satisfaction ratings in AI companies. While Glassdoor 
+scores do have a positive relationship with revenue, the effect is much smaller compared to the company's age.
+
+The robust modelling approach with Student-t likelihood enhances our confidence in these findings by 
+appropriately handling potential outliers and non-normality in the data. The heavy-tailed error distribution 
+allows the model to accommodate unexpected variations that might be present in financial data.
+
+For strategic decision-making, these results suggest that investors and stakeholders in 
+AI companies should consider company maturity as a primary indicator of revenue potential, 
+while still recognizing the positive but smaller contribution of employee satisfaction to financial performance.
+
+
+
+
+
+# References
+
+1. Gelman, A., Carlin, J. B., Stern, H. S., Dunson, D. B., Vehtari, A., & Rubin, D. B. (2013). Bayesian Data Analysis (3rd ed.). Chapman and Hall/CRC.
+
+2. Johnson, A. A., Ott, M. Q., & Dogucu, M. (2022). Bayes Rules! An Introduction to Applied Bayesian Modeling. Chapman and Hall/CRC.
+
+3. Carpenter, B., Gelman, A., Hoffman, M. D., Lee, D., Goodrich, B., Betancourt, M., ... & Riddell, A. (2017). Stan: A probabilistic programming language. Journal of Statistical Software, 76(1).
+
+4. https://stackoverflow.com/questions/75759658/what-is-the-most-efficient-way-to-clean-currency-data-in-r

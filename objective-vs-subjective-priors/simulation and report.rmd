@@ -1,0 +1,187 @@
+---
+title: "Assignment 4"
+author: "Madimetja Maredi"
+date: "`r Sys.Date()`"
+output: word_document
+---
+  
+# Setup
+```{r, warning=FALSE, message=FALSE}
+library(rstan)
+set.seed(2014095653)
+```
+
+# Parameters
+```{r}
+
+h1 <- 0.96   
+h2 <- 1.08   
+h3 <- 0.96   
+h4 <- 1.09   
+h5 <- 315    
+h6 <- 442    
+h7 <- 112    
+h8 <- 0.32   
+h9 <- 1.09   
+h10 <- 1.16  
+h11 <- 2.0   
+h12 <- 1.7   
+
+
+n <- 50      
+M <- 100     
+```
+
+# Stan Models
+
+Define two Stan Models
+
+Objective Prior Model: 
+Uses a non-informative prior π(a, b) ∝ a^(-1) * b^(-1) for the beta distribution parameters. This is implemented as -log(alpha) - log(beta) in the target function.
+
+Subjective Prior Model: 
+Uses informative lognormal priors for alpha and beta parameters with hyperparameters h11 and h12.
+```{r}
+
+objective_prior_code <- "
+data {
+  int<lower=0> n;
+  vector<lower=0, upper=1>[n] y;
+}
+parameters {
+  real<lower=0> alpha;
+  real<lower=0> beta;
+}
+model {
+  target += -log(alpha) - log(beta);  
+  y ~ beta(alpha, beta);              
+}
+"
+
+subjective_prior_code <- "
+data {
+  int<lower=0> n;
+  vector<lower=0, upper=1>[n] y;
+  real<lower=0> h11;
+  real<lower=0> h12;
+}
+parameters {
+  real<lower=0> alpha;
+  real<lower=0> beta;
+}
+model {
+  alpha ~ lognormal(0, h11);  
+  beta ~ lognormal(0, h12);   
+  y ~ beta(alpha, beta);      
+}
+"
+
+
+model_obj <- stan_model(model_code = objective_prior_code)
+model_subj <- stan_model(model_code = subjective_prior_code)
+```
+
+# Loss Function
+
+Define a loss function that evaluates the consequences of the decision:
+
+If correctly identifying the true model (either way): reward of h7 (112)
+
+If falsely classifying a non-uniform model as uniform: penalty of h5 (315)
+
+If falsely classifying a uniform model as non-uniform: penalty of h6 (442)
+```{r}
+calculate_loss <- function(true_model, decision) {
+  if ((true_model == 1 && decision == 1) || (true_model == 0 && decision == 0)) {
+    return(-h7)  
+  } else if (true_model == 0 && decision == 1) {
+    return(h5)   
+  } else {       
+    return(h6)   
+  }
+}
+```
+
+# Simulation
+
+simulation loop that runs M times:
+
+For each iteration, it randomly selects the true model with probability h8 (0.32)
+
+Generates data from either a uniform beta(1,1) or non-uniform beta(h9, h10) distribution
+
+Fits both the objective and subjective prior models to the data
+
+Extracts the posterior median estimates for alpha and beta from both models
+
+Makes decisions about the model based on whether the parameters fall within specified bounds
+
+Calculates and stores the resulting loss for each prior approach
+```{r, results='hide', warning=FALSE, message=FALSE}
+
+results_objective <- numeric(M)
+results_subjective <- numeric(M)
+
+for (m in 1:M) {
+  if (m %% 10 == 0) cat("Iteration:", m, "of", M, "\n")
+  
+
+  true_model <- rbinom(1, 1, h8)
+  
+
+  if (true_model == 1) {
+    data <- rbeta(n, 1, 1)  # Uniform (Beta(1,1))
+  } else {
+    data <- rbeta(n, h9, h10)  # Non-uniform
+  }
+  
+
+  fit_obj <- sampling(model_obj, 
+                      data = list(n = n, y = data),
+                      chains = 1, iter = 2000, warmup = 1000,
+                      refresh = 0, show_messages = FALSE)
+
+  fit_subj <- sampling(model_subj, 
+                       data = list(n = n, y = data, h11 = h11, h12 = h12),
+                       chains = 1, iter = 2000, warmup = 1000,
+                       refresh = 0, show_messages = FALSE)
+  
+
+  params_obj <- summary(fit_obj, pars = c("alpha", "beta"), probs = 0.5)$summary[, "50%"]
+  params_subj <- summary(fit_subj, pars = c("alpha", "beta"), probs = 0.5)$summary[, "50%"]
+  
+
+  decision_obj <- as.integer(h1 < params_obj[1] && params_obj[1] < h2 && 
+                               h3 < params_obj[2] && params_obj[2] < h4)
+  
+  decision_subj <- as.integer(h1 < params_subj[1] && params_subj[1] < h2 && 
+                                h3 < params_subj[2] && params_subj[2] < h4)
+  
+
+  results_objective[m] <- calculate_loss(true_model, decision_obj)
+  results_subjective[m] <- calculate_loss(true_model, decision_subj)
+}
+```
+
+# Results
+
+Calculates the expected risk (average loss) for both the objective and subjective prior approaches
+
+Displays these results
+
+Determines which prior approach provides the minimum risk
+```{r}
+
+risk_objective <- mean(results_objective)
+risk_subjective <- mean(results_subjective)
+
+cat("Expected Risk (Objective Prior):", risk_objective, "\n")
+cat("Expected Risk (Subjective Prior):", risk_subjective, "\n")
+
+
+if (risk_objective < risk_subjective) {
+  cat("The Objective Prior provides the minimum risk.\n")
+} else {
+  cat("The Subjective Prior provides the minimum risk.\n")
+}
+```
